@@ -310,7 +310,7 @@ def save_to_mongodb(db, collection_name: str, data: List[Dict]) -> None:
         logger.warning(f"Нет данных для сохранения в {collection_name}")
         return
     
-    db[collection_name].drop()
+    # db[collection_name].drop()
     db[collection_name].insert_many(data)
     logger.info(f"Сохранено {len(data)} записей в коллекцию {collection_name}")
 
