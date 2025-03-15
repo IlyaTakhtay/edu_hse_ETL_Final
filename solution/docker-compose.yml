@@ -1,0 +1,50 @@
+name: etl_module3
+services:
+  mongodb:
+    image: mongo:latest
+    container_name: mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD}
+      - MONGO_INITDB_DATABASE=${MONGO_DB}
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - mongodb-data:/data/db
+    networks:
+      - app-network
+  datagen:
+    build: ./datagen
+    container_name: datagen
+    depends_on:
+        mongodb:
+          condition: service_healthy
+    networks:
+      - app-network
+    restart: on-failure
+    # env_file: # весь env грузить not safety конечно, ну лан # когда-нибудь будет фикс
+    #   - .env
+    environment:
+      - MONGO_PORT=${MONGO_PORT}
+      - MONGO_ROOT_USERNAME=${MONGO_ROOT_USERNAME}
+      - MONGO_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD}
+      - MONGO_DB=${MONGO_DB}
+      - AMOUNT_USERS=${AMOUNT_USERS}
+      - AMOUNT_PRODUCTS=${AMOUNT_PRODUCTS}
+      - AMOUNT_SESSIONS=${AMOUNT_SESSIONS}
+      - AMOUNT_EVENTS=${AMOUNT_EVENTS}
+      - AMOUNT_TICKETS=${AMOUNT_TICKETS}
+      - AMOUNT_REVIEWS=${AMOUNT_REVIEWS}
+      - AMOUNT_QUERIES=${AMOUNT_QUERIES}
+volumes:
+  mongodb-data:
+
+networks:
+  app-network:
+    driver: bridge
