@@ -141,7 +141,7 @@ def generate_user_sessions(users: List[Dict], products: List[Dict], count: int =
                 'browser': fake.user_agent(),
                 'ip': fake.ipv4()
             },
-            'actions': sorted(user_actions, key=lambda x: x['timestamp'])
+            'actions': sorted(user_actions, key=lambda x: datetime.fromisoformat(str(x['timestamp'])))
         })
     
     return sessions
