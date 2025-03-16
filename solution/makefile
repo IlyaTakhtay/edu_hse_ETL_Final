@@ -65,3 +65,7 @@ migrate:
 	-e FLYWAY_PLACEHOLDERS_app_database=${POSTGRES_DB} \
 	-e FLYWAY_PLACEHOLDERS_app_schema=${POSTGRES_SCHEMA} \
 	flyway/flyway:latest migrate
+
+# # 6. Запуск миграций в postgres
+# .PHONY:
+# migrate:

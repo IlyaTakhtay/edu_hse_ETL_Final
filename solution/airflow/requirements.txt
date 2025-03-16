@@ -1,0 +1,6 @@
+pymongo
+pandas
+sqlalchemy
+psycopg2-binary
+apache-airflow-providers-postgres
+apache-airflow-providers-mongo
