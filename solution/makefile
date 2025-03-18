@@ -11,15 +11,15 @@ CONFIG_FILE=$(CURDIR)/postgres/flyway.conf
 .PHONY: help
 help: ## Показать доступные команды
 	@echo "Доступные команды:"
+	@echo "  make up         - Запустить компоуз (просто поднять контейнеры)"
 	@echo "  make build      - Запустить билд компоуз"
 	@echo "  make rebuild    - Запустить компоуз с пересборкой и очисткой данных"
-	@echo "  make up         - Запустить компоуз (просто поднять контейнеры)"
 	@echo "  make gen-data   - Запустить генератор данных"
 	@echo "  make down       - Остановить компоуз"
 
 # 0. Запуск сборки
 .PHONY: build
-build: ## Полная пересборка с очисткой
+build: ## Полная пересборка
 	docker-compose -f $(COMPOSE_FILE) build
 	docker-compose -f $(COMPOSE_FILE) up -d
 

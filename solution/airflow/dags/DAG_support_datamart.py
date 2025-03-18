@@ -1,8 +1,7 @@
+import logging
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.providers.postgres.operators.postgres import PostgresOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-from airflow.providers.mongo.hooks.mongo import MongoHook
 from datetime import datetime, timedelta
 import pandas as pd
 
@@ -13,133 +12,112 @@ default_args = {
     'start_date': datetime(2025, 3, 1)
 }
 
+def create_review_mart_table():
+    """Создает таблицу датамарта"""
+    hook = PostgresHook(postgres_conn_id='postgres_conn')
+    hook.run("""
+        CREATE TABLE IF NOT EXISTS etl.review_mart (
+            product_id VARCHAR(255),
+            total_reviews INT,
+            avg_rating FLOAT,
+            approved_reviews_ratio FLOAT,
+            total_flags INT,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (product_id)
+        );
+    """)
+
+def process_review_data(**context):
+    """Извлечение и обработка данных из moderation_queue"""
+    hook = PostgresHook(postgres_conn_id='postgres_conn')
+    
+    # Получение всех данных из таблицы moderation_queue
+    query = """
+    SELECT 
+        product_id,
+        review_id,
+        rating,
+        moderation_status,
+        flags
+    FROM 
+        moderation_queue
+    """
+    
+    # Логируем сам запрос для диагностики
+    logging.info("Executing query: %s", query)
+    
+    # Извлечение данных в Pandas DataFrame
+    df = hook.get_pandas_df(query)
+    
+    # Логируем количество извлеченных записей и первые несколько строк данных
+    logging.info("Number of records extracted: %d", len(df))
+    if not df.empty:
+        logging.info("Sample data extracted:\n%s", df.head().to_string())
+    else:
+        logging.warning("No data found in moderation_queue.")
+    
+    if df.empty:
+        return pd.DataFrame()  # Если данных нет, возвращаем пустой DataFrame
+    
+    # Подсчет количества флагов
+    df['flags_count'] = df['flags'].apply(lambda x: len(x) if isinstance(x, list) else 0)
+    
+    # Агрегация данных по продуктам
+    aggregated = df.groupby('product_id').agg(
+        total_reviews=('review_id', 'count'),
+        avg_rating=('rating', 'mean'),
+        approved_reviews_ratio=('moderation_status', lambda x: (x == 'approved').mean()),
+        total_flags=('flags_count', 'sum')
+    ).reset_index()
+    
+    return aggregated
+
+def load_review_mart(**context):
+    """Загрузка обработанных данных в таблицу датамарта"""
+    df = context['ti'].xcom_pull(task_ids='process_review_data')
+    
+    if df.empty:
+        logging.warning("No data to load into review_mart.")
+        return "No data to load"
+    
+    hook = PostgresHook(postgres_conn_id='postgres_conn')
+    
+    # Вставка данных в таблицу review_mart
+    hook.insert_rows(
+        table='etl.review_mart',
+        rows=df[['product_id', 'total_reviews', 'avg_rating', 'approved_reviews_ratio', 'total_flags']].values.tolist(),
+        target_fields=['product_id', 'total_reviews', 'avg_rating', 'approved_reviews_ratio', 'total_flags'],
+        replace=True,  # Заменяем существующие записи
+        replace_index=['product_id']  # Указываем уникальный индекс
+    )
+    
+    logging.info("Loaded %d records into review_mart.", len(df))
+    
+    return f"Loaded {len(df)} records into review_mart"
+
+
 with DAG(
-    'support_efficiency_mart',
+    'review_data_mart_full_period',
     default_args=default_args,
-    schedule_interval='@daily',
+    schedule_interval=None,  # Запуск вручную для обработки всех данных за весь период
     catchup=False
 ) as dag:
-
-    # Создание таблицы витрины
-    create_mart_table = PostgresOperator(
-        task_id='create_mart_table',
-        postgres_conn_id='postgres_conn',
-        sql="""
-        CREATE TABLE IF NOT EXISTS etl.support_efficiency_mart (
-            date_id DATE,
-            agent_id VARCHAR(50),
-            issue_type VARCHAR(50),
-            tickets_count INT,
-            first_response_time_minutes FLOAT,
-            avg_response_time_minutes FLOAT,
-            resolution_time_hours FLOAT,
-            interactions_count FLOAT,
-            PRIMARY KEY (date_id, agent_id, issue_type)
-        );
-        """
+    
+    create_table_task = PythonOperator(
+        task_id='create_review_mart_table',
+        python_callable=create_review_mart_table
     )
 
-    # Извлечение и обработка данных
-    def process_tickets_data(**context):
-        # Подключение к MongoDB
-        mongo_hook = MongoHook(mongo_conn_id='mongo_conn')
-        
-        # Получение тикетов за предыдущие сутки
-        yesterday = context['execution_date'] - timedelta(days=1)
-        tickets = mongo_hook.find(
-            mongo_collection='tickets',
-            query={
-                'created_at': {'$gte': yesterday, '$lt': context['execution_date']}
-            },
-            mongo_db='ecomm_db'
-        )
-        
-        # Расчет метрик для каждого тикета
-        metrics = []
-        for ticket in tickets:
-            # Нахождение первого ответа поддержки
-            support_messages = [m for m in ticket['messages'] if m['sender'] == 'support']
-            customer_messages = [m for m in ticket['messages'] if m['sender'] == 'customer']
-            
-            if support_messages:
-                first_response_time = (support_messages[0]['timestamp'] - ticket['created_at']).total_seconds() / 60
-                
-                # Расчет среднего времени ответа
-                response_times = []
-                for i, msg in enumerate(customer_messages):
-                    for support_msg in support_messages:
-                        if support_msg['timestamp'] > msg['timestamp']:
-                            response_times.append((support_msg['timestamp'] - msg['timestamp']).total_seconds() / 60)
-                            break
-                
-                avg_response_time = sum(response_times) / len(response_times) if response_times else 0
-                
-                # Время разрешения (если тикет закрыт)
-                resolution_time = 0
-                if ticket['status'] == 'closed':
-                    resolution_time = (ticket['updated_at'] - ticket['created_at']).total_seconds() / 3600
-                
-                # Другие метрики
-                metrics.append({
-                    'date_id': yesterday.date(),
-                    'agent_id': support_messages[0]['agent_id'] if 'agent_id' in support_messages[0] else 'unknown',
-                    'issue_type': ticket['issue_type'],
-                    'first_response_time': first_response_time,
-                    'avg_response_time': avg_response_time,
-                    'resolution_time': resolution_time,
-                    'interactions_count': len(ticket['messages'])
-                })
-        
-        # Агрегация по агентам и типам проблем
-        return metrics
-
-    transform_data = PythonOperator(
-        task_id='transform_ticket_data',
-        python_callable=process_tickets_data,
+    process_data_task = PythonOperator(
+        task_id='process_review_data',
+        python_callable=process_review_data,
         provide_context=True
     )
 
-    # Загрузка данных в витрину
-    def load_metrics_to_mart(**context):
-        metrics = context['ti'].xcom_pull(task_ids='transform_ticket_data')
-        
-        if not metrics:
-            return "No data to load"
-            
-        # Агрегация метрик
-        df = pd.DataFrame(metrics)
-        aggregated = df.groupby(['date_id', 'agent_id', 'issue_type']).agg({
-            'first_response_time': 'mean',
-            'avg_response_time': 'mean',
-            'resolution_time': 'mean',
-            'interactions_count': 'mean'
-        }).reset_index()
-        
-        # Добавление подсчета тикетов
-        counts = df.groupby(['date_id', 'agent_id', 'issue_type']).size().reset_index(name='tickets_count')
-        aggregated = aggregated.merge(counts, on=['date_id', 'agent_id', 'issue_type'])
-        
-        # Загрузка в PostgreSQL
-        pg_hook = PostgresHook(postgres_conn_id='postgres_conn')
-        pg_hook.insert_rows(
-            table='etl.support_efficiency_mart',
-            rows=aggregated.values.tolist(),
-            target_fields=[
-                'date_id', 'agent_id', 'issue_type', 'tickets_count',
-                'first_response_time_minutes', 'avg_response_time_minutes',
-                'resolution_time_hours', 'interactions_count'
-            ],
-            replace=True,
-            replace_index=['date_id', 'agent_id', 'issue_type']
-        )
-        
-        return f"Loaded {len(aggregated)} records into support efficiency mart"
-
-    load_mart = PythonOperator(
-        task_id='load_support_mart',
-        python_callable=load_metrics_to_mart,
+    load_data_task = PythonOperator(
+        task_id='load_review_mart',
+        python_callable=load_review_mart,
         provide_context=True
     )
 
-    # Последовательность задач
-    create_mart_table >> transform_data >> load_mart
+create_table_task >> process_data_task >> load_data_task
